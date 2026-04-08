@@ -14,6 +14,7 @@ class Orchestrator:
         ]
         self.tools = {
             "run_shell": code_tools.run_shell_command,
+            "force_command": code_tools.force_command,          # NEW: unrestricted shell
             "scaffold_react": code_tools.scaffold_react_project,
             "deploy_ssh": deploy_tools.deploy_via_ssh,
             "screenshot_desktop": screenshot_tools.capture_desktop_screen,
@@ -28,21 +29,36 @@ class Orchestrator:
         self.conversation_history.append({"role": "assistant", "content": content})
 
     def plan_and_execute(self, user_request: str) -> str:
-        """
-        Main entry point: given a user request, the agent plans and executes.
-        """
         self.add_user_message(user_request)
         response = self.client.chat(self.conversation_history, temperature=0.2)
         self.add_assistant_message(response)
-
-        # Simple tool-use parsing: if response contains a tool call (we can use function calling in production)
-        # For brevity, we'll just return the response. In a full implementation, you'd parse tool calls.
         return response
 
+    def plan_and_execute_deep(self, user_request: str) -> str:
+        """Execute a task with deeper reasoning (more tokens, lower temp)."""
+        self.add_user_message(user_request)
+        response = self.client.deep_chat(self.conversation_history)
+        self.add_assistant_message(response)
+        return response
+
+    def self_improve(self, original_task: str, previous_response: str) -> str:
+        """
+        Ask the agent to critique and improve its previous answer.
+        Returns the improved version.
+        """
+        prompt = f"""Original task: {original_task}
+
+Your previous response:
+{previous_response}
+
+Please review your response. Identify any issues, missing details, or ways to enhance quality. Then provide an improved version."""
+        messages = [
+            {"role": "system", "content": ORCHESTRATOR_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ]
+        return self.client.chat(messages, temperature=0.3)
+
     def generate_code(self, specification: str, context: str = "") -> str:
-        """
-        Generate code based on specification with UI/UX constraints.
-        """
         messages = [
             {"role": "system", "content": ORCHESTRATOR_SYSTEM_PROMPT},
             {"role": "user", "content": f"Context: {context}\n\nSpecification: {specification}\n\nGenerate the complete code."}

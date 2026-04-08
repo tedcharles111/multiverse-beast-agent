@@ -25,7 +25,6 @@ class MistralClientPool:
 
     def chat(self, messages: List[Dict[str, str]], model: str = "mistral-large-latest", **kwargs) -> str:
         errors = []
-        # Try each key, with 2 attempts per key
         for attempt in range(len(self.api_keys) * 2):
             key = self.api_keys[self.current_index]
             headers = self._get_headers(key)
@@ -35,7 +34,6 @@ class MistralClientPool:
                 **kwargs
             }
             try:
-                # Increase timeout: connection timeout 30s, read timeout 180s
                 response = requests.post(
                     MISTRAL_API_URL,
                     json=payload,
@@ -49,23 +47,21 @@ class MistralClientPool:
                     error_msg = f"Key {self.current_index} failed: HTTP {response.status_code} - {response.text}"
                     errors.append(error_msg)
                     print(f"[Mistral] {error_msg}")
-            except requests.exceptions.Timeout as e:
-                error_msg = f"Key {self.current_index} timed out: {e}"
-                errors.append(error_msg)
-                print(f"[Mistral] {error_msg}")
             except Exception as e:
                 error_msg = f"Key {self.current_index} failed: {e}"
                 errors.append(error_msg)
                 print(f"[Mistral] {error_msg}")
-            
-            # Exponential backoff before rotating
-            wait = 2 ** (attempt % 2)  # 1s, 2s, 1s, 2s...
-            print(f"[Mistral] Waiting {wait}s before retry...")
+            wait = 2 ** (attempt % 2)
             time.sleep(wait)
-            # Rotate after two attempts with same key
             if attempt % 2 == 1:
                 self._rotate_key()
         raise Exception(f"All Mistral API keys failed after retries. Errors: {errors}")
+
+    def deep_chat(self, messages: List[Dict[str, str]], model: str = "mistral-large-latest") -> str:
+        """
+        Engage in deeper reasoning with higher token limit and lower temperature.
+        """
+        return self.chat(messages, model=model, temperature=0.1, max_tokens=4096)
 
     def chat_stream(self, messages: List[Dict[str, str]], model: str = "mistral-large-latest", **kwargs):
         errors = []

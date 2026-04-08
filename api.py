@@ -8,16 +8,23 @@ orchestrator = Orchestrator()
 
 class TaskRequest(BaseModel):
     task: str
-    stream: bool = False
+    deep: bool = False  # Set to True for deep thinking mode
 
 class CodeGenRequest(BaseModel):
     specification: str
     context: str = ""
 
+class SelfImproveRequest(BaseModel):
+    original_task: str
+    previous_response: str
+
 @app.post("/execute")
 async def execute_task(request: TaskRequest):
     try:
-        result = orchestrator.plan_and_execute(request.task)
+        if request.deep:
+            result = orchestrator.plan_and_execute_deep(request.task)
+        else:
+            result = orchestrator.plan_and_execute(request.task)
         return {"status": "success", "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -27,6 +34,14 @@ async def generate_code(request: CodeGenRequest):
     try:
         code = orchestrator.generate_code(request.specification, request.context)
         return {"status": "success", "code": code}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/self-improve")
+async def self_improve(request: SelfImproveRequest):
+    try:
+        improved = orchestrator.self_improve(request.original_task, request.previous_response)
+        return {"status": "success", "improved_result": improved}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -1,14 +1,25 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from agent.orchestrator import Orchestrator
 import uvicorn
 
 app = FastAPI(title="AI Coding Agent API")
+
+# --- CORS Configuration ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins (including https://themultiverse.build)
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 orchestrator = Orchestrator()
 
 class TaskRequest(BaseModel):
     task: str
-    deep: bool = False  # Set to True for deep thinking mode
+    deep: bool = False
 
 class CodeGenRequest(BaseModel):
     specification: str

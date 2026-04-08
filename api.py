@@ -6,13 +6,14 @@ import uvicorn
 
 app = FastAPI(title="AI Coding Agent API")
 
-# --- CORS Configuration ---
+# --- CORS Configuration (allow all for debugging) ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins (including https://themultiverse.build)
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 orchestrator = Orchestrator()
@@ -29,6 +30,10 @@ class SelfImproveRequest(BaseModel):
     original_task: str
     previous_response: str
 
+@app.options("/execute")
+async def options_execute():
+    return {"message": "OK"}
+
 @app.post("/execute")
 async def execute_task(request: TaskRequest):
     try:
@@ -40,6 +45,10 @@ async def execute_task(request: TaskRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.options("/generate-code")
+async def options_generate():
+    return {"message": "OK"}
+
 @app.post("/generate-code")
 async def generate_code(request: CodeGenRequest):
     try:
@@ -47,6 +56,10 @@ async def generate_code(request: CodeGenRequest):
         return {"status": "success", "code": code}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.options("/self-improve")
+async def options_self_improve():
+    return {"message": "OK"}
 
 @app.post("/self-improve")
 async def self_improve(request: SelfImproveRequest):

@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: multiverse-beast
+    runtime: python
+    buildCommand: pip install -r requirements.txt && playwright install chromium
+    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: MISTRAL_API_KEY_1
+        sync: false
+      - key: MISTRAL_API_KEY_2
+        sync: false
+      - key: MISTRAL_API_KEY_3
+        sync: false

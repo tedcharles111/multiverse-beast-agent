@@ -1,3 +1,4 @@
+import time
 # agent/tools/screenshot_tools.py
 import os
 import tempfile
@@ -43,3 +44,4 @@ def capture_full_page(url: str, output_path: str = None) -> str:
         page.screenshot(path=output_path, full_page=True)
         browser.close()
     return output_path
+import time  # added missing import

@@ -20,7 +20,6 @@ class TaskRequest(BaseModel):
     task: Optional[str] = None
     prompt: Optional[str] = None
     deep: bool = False
-
     def get_task(self) -> str:
         return self.task or self.prompt or ""
 
@@ -35,8 +34,9 @@ class SelfImproveRequest(BaseModel):
     original_task: str
     previous_response: str
 
-@app.options("/execute")
-async def options_exec(): return {}
+@app.get("/health")
+async def health(): return {"status": "healthy"}
+
 @app.post("/execute")
 async def execute_task(request: TaskRequest):
     task = request.get_task()
@@ -48,8 +48,6 @@ async def execute_task(request: TaskRequest):
     except Exception as e:
         raise HTTPException(500, str(e))
 
-@app.options("/generate-code")
-async def options_gen(): return {}
 @app.post("/generate-code")
 async def generate_code(request: CodeGenRequest):
     spec = request.get_specification()
@@ -60,8 +58,6 @@ async def generate_code(request: CodeGenRequest):
     except Exception as e:
         raise HTTPException(500, str(e))
 
-@app.options("/self-improve")
-async def options_improve(): return {}
 @app.post("/self-improve")
 async def self_improve(request: SelfImproveRequest):
     try:
@@ -70,8 +66,33 @@ async def self_improve(request: SelfImproveRequest):
     except Exception as e:
         raise HTTPException(500, str(e))
 
-@app.get("/health")
-async def health(): return {"status": "healthy"}
+# --- NEW: isolated deployment test endpoint (cannot crash main agent) ---
+@app.post("/deploy-netlify")
+async def deploy_netlify_test():
+    """Calls the Netlify REST API directly to deploy a tiny HTML file."""
+    import os, io, zipfile, requests
+    token = os.getenv('NETLIFY_AUTH_TOKEN')
+    if not token:
+        return {"status": "error", "detail": "NETLIFY_AUTH_TOKEN not set"}
+    # Create a minimal zip with index.html
+    html = b"<html><body><h1>Beast is live on Netlify!</h1></body></html>"
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr('index.html', html)
+    zip_buf.seek(0)
+    headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/zip'}
+    # Create a new site
+    site_resp = requests.post('https://api.netlify.com/api/v1/sites', headers={'Authorization': f'Bearer {token}'}, json={})
+    if site_resp.status_code != 201:
+        return {"status": "error", "detail": f"Site creation failed: {site_resp.text}"}
+    site_id = site_resp.json()['id']
+    # Deploy the zip
+    deploy_resp = requests.post(f'https://api.netlify.com/api/v1/sites/{site_id}/deploys', headers=headers, data=zip_buf)
+    if deploy_resp.status_code == 200:
+        url = deploy_resp.json().get('deploy_ssl_url') or deploy_resp.json().get('url')
+        return {"status": "success", "url": url}
+    else:
+        return {"status": "error", "detail": deploy_resp.text}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -1,11 +1,23 @@
+import traceback, sys, os, time, threading, requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
-from agent.orchestrator import Orchestrator
-import uvicorn
+
+# Attempt to import Orchestrator safely
+Orchestrator = None
+import_error = None
+try:
+    from agent.orchestrator import Orchestrator as _Orch
+    Orchestrator = _Orch
+except Exception as e:
+    import_error = traceback.format_exc()
+    print("CRITICAL: Orchestrator import failed", file=sys.stderr)
+    print(import_error, file=sys.stderr)
 
 app = FastAPI(title="Beast Coder Agent")
+
+# CORS middleware (always active, even if orchestrator is dead)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,15 +31,11 @@ class TaskRequest(BaseModel):
     task: Optional[str] = None
     prompt: Optional[str] = None
     deep: bool = False
-    def get_task(self) -> str:
-        return self.task or self.prompt or ""
 
 class CodeGenRequest(BaseModel):
     specification: Optional[str] = None
     prompt: Optional[str] = None
     context: str = ""
-    def get_specification(self) -> str:
-        return self.specification or self.prompt or ""
 
 class SelfImproveRequest(BaseModel):
     original_task: str
@@ -37,45 +45,73 @@ class SelfImproveRequest(BaseModel):
 @app.options("/execute")
 @app.options("/generate-code")
 @app.options("/self-improve")
-async def options_all(): return {}
+async def options_all():
+    return {}
 
 @app.get("/health")
-async def health(): return {"status": "healthy"}
+async def health():
+    if Orchestrator is None:
+        return {"status": "degraded", "error": "Orchestrator not loaded"}
+    return {"status": "healthy"}
+
+def get_orchestrator():
+    if Orchestrator is None:
+        raise HTTPException(503, f"Agent not available: {import_error[:200] if import_error else 'Unknown error'}")
+    return Orchestrator()
 
 @app.post("/execute")
 async def execute_task(request: TaskRequest):
-    task = request.get_task()
+    task = request.prompt or request.task or ""
     if not task:
-        raise HTTPException(422, "Need task or prompt")
+        raise HTTPException(422, "Need prompt")
     try:
-        orch = Orchestrator()
+        orch = get_orchestrator()
         result = orch.plan_and_execute(task) if not request.deep else orch.plan_and_execute_deep(task)
         return {"status": "success", "result": result}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, str(e))
 
 @app.post("/generate-code")
 async def generate_code(request: CodeGenRequest):
-    spec = request.get_specification()
-    if not spec and not request.context:
-        raise HTTPException(422, "Need specification/prompt or context")
+    prompt = request.prompt or request.specification or ""
+    if not prompt:
+        raise HTTPException(422, "Need prompt")
     try:
-        orch = Orchestrator()
-        code = orch.generate_code(spec or "", request.context)
+        orch = get_orchestrator()
+        code = orch.generate_code(prompt, request.context)
         return {"status": "success", "code": code}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, str(e))
 
 @app.post("/self-improve")
 async def self_improve(request: SelfImproveRequest):
-    if not request.original_task or not request.previous_response:
-        raise HTTPException(422, "Both original_task and previous_response required")
     try:
-        orch = Orchestrator()
+        orch = get_orchestrator()
         improved = orch.self_improve(request.original_task, request.previous_response)
         return {"status": "success", "improved_result": improved}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, str(e))
 
+# Background keep‑alive to prevent cold starts
+def keep_alive():
+    time.sleep(30)
+    while True:
+        try:
+            requests.get("http://localhost:8000/health", timeout=5)
+        except Exception:
+            pass
+        time.sleep(300)  # every 5 minutes
+
+@app.on_event("startup")
+async def startup_event():
+    threading.Thread(target=keep_alive, daemon=True).start()
+
 if __name__ == "__main__":
+    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

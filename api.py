@@ -1,12 +1,19 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import Optional
 from agent.orchestrator import Orchestrator
 import uvicorn
+import requests
+import asyncio
+import logging
 
-app = FastAPI(title="AI Coding Agent API")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
+app = FastAPI(title="Beast Coder Agent")
+
+# --- CORS: allow all origins ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -35,13 +42,30 @@ class CodeGenRequest(BaseModel):
         return self.specification or self.prompt or ""
 
 class SelfImproveRequest(BaseModel):
-    original_task: Optional[str] = None
-    prompt: Optional[str] = Field(None, alias="original_task_alias")  # Not used, just for compatibility
+    original_task: str
     previous_response: str
 
-    def get_original_task(self) -> str:
-        return self.original_task or ""
+@app.on_event("startup")
+async def startup_event():
+    """Start background keep-alive task."""
+    asyncio.create_task(keep_alive_ping())
 
+async def keep_alive_ping():
+    """Ping /health every 10 minutes to prevent Render idle shutdown."""
+    await asyncio.sleep(60)  # wait a minute after startup
+    while True:
+        try:
+            requests.get("https://multiverse-beast-agent.onrender.com/health", timeout=10)
+            logger.info("Keep-alive ping sent")
+        except Exception as e:
+            logger.error(f"Keep-alive ping failed: {e}")
+        await asyncio.sleep(600)  # 10 minutes
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+# Explicit OPTIONS handlers for CORS preflight
 @app.options("/execute")
 async def options_execute():
     return {}
@@ -58,10 +82,11 @@ async def execute_task(request: TaskRequest):
             result = orchestrator.plan_and_execute(task_text)
         return {"status": "success", "result": result}
     except Exception as e:
+        logger.exception("Execute failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.options("/generate-code")
-async def options_generate():
+async def options_generate_code():
     return {}
 
 @app.post("/generate-code")
@@ -73,6 +98,7 @@ async def generate_code(request: CodeGenRequest):
         code = orchestrator.generate_code(spec, request.context)
         return {"status": "success", "code": code}
     except Exception as e:
+        logger.exception("Generate code failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.options("/self-improve")
@@ -81,17 +107,14 @@ async def options_self_improve():
 
 @app.post("/self-improve")
 async def self_improve(request: SelfImproveRequest):
-    if not request.original_task and not request.previous_response:
-        raise HTTPException(status_code=422, detail="'original_task' and 'previous_response' are required")
+    if not request.original_task or not request.previous_response:
+        raise HTTPException(status_code=422, detail="Both 'original_task' and 'previous_response' are required")
     try:
         improved = orchestrator.self_improve(request.original_task, request.previous_response)
         return {"status": "success", "improved_result": improved}
     except Exception as e:
+        logger.exception("Self-improve failed")
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/health")
-async def health():
-    return {"status": "healthy"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

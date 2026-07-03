@@ -1,9 +1,4 @@
-import os
-import subprocess
-import json
-import time
-import tempfile
-import requests
+import os, io, zipfile, requests, tempfile, json, time, subprocess
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
@@ -82,106 +77,102 @@ def purchase_domain(domain: str, provider: str = 'namecom') -> dict:
         return {"error": f"Provider {provider} not supported."}
     return resp.json()
 
-# ---------- Deploy using REST APIs ----------
-
+# ---------- Pure Python Deployments (no Node required) ----------
 def deploy_netlify(project_path: str) -> str:
-    """Deploy built site to Netlify via REST API (no CLI needed)."""
     token = os.getenv('NETLIFY_AUTH_TOKEN')
     if not token:
         return "Netlify token not configured."
-    # Ensure the project is built
-    subprocess.run(['npm', 'run', 'build'], cwd=project_path, shell=True, capture_output=True)
-    dist_path = os.path.join(project_path, 'dist')
-    if not os.path.exists(dist_path):
-        return "Build directory 'dist' not found. Build failed."
-    # Create a new site on Netlify
-    headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
-    site_resp = requests.post('https://api.netlify.com/api/v1/sites', headers=headers, json={})
+    dist = os.path.join(project_path, 'dist')
+    if not os.path.exists(dist):
+        dist = project_path
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for root, _, files in os.walk(dist):
+            for f in files:
+                full = os.path.join(root, f)
+                arc = os.path.relpath(full, dist)
+                zf.write(full, arc)
+    zip_buf.seek(0)
+    headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/zip'}
+    site_resp = requests.post('https://api.netlify.com/api/v1/sites', headers={'Authorization': f'Bearer {token}'}, json={})
     if site_resp.status_code != 201:
-        return f"Failed to create Netlify site: {site_resp.text}"
-    site_data = site_resp.json()
-    site_id = site_data['id']
-    # Deploy files by zipping dist and uploading
-    import io, zipfile
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for root, _, files in os.walk(dist_path):
-            for file in files:
-                full_path = os.path.join(root, file)
-                arcname = os.path.relpath(full_path, dist_path)
-                zf.write(full_path, arcname)
-    zip_buffer.seek(0)
-    deploy_headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/zip'}
-    deploy_resp = requests.post(
-        f'https://api.netlify.com/api/v1/sites/{site_id}/deploys',
-        headers=deploy_headers,
-        data=zip_buffer
-    )
-    if deploy_resp.status_code != 200:
-        return f"Deploy failed: {deploy_resp.text}"
-    deploy_data = deploy_resp.json()
-    return f"Deployed to Netlify: {deploy_data['deploy']['ssl_url']}"
+        return f"Netlify site creation failed: {site_resp.text}"
+    site_id = site_resp.json()['id']
+    deploy_resp = requests.post(f'https://api.netlify.com/api/v1/sites/{site_id}/deploys', headers=headers, data=zip_buf)
+    if deploy_resp.status_code == 200:
+        data = deploy_resp.json()
+        return f"Netlify deployed: {data.get('deploy_ssl_url') or data.get('url')}"
+    else:
+        return f"Netlify deploy failed: {deploy_resp.text}"
 
 def deploy_vercel(project_path: str) -> str:
-    """Deploy built site to Vercel via REST API."""
     token = os.getenv('VERCEL_TOKEN')
     if not token:
         return "Vercel token not configured."
-    subprocess.run(['npm', 'run', 'build'], cwd=project_path, shell=True, capture_output=True)
-    dist_path = os.path.join(project_path, 'dist')
-    if not os.path.exists(dist_path):
-        return "Build directory 'dist' not found."
-    # Vercel REST API: upload files then create deployment
+    dist = os.path.join(project_path, 'dist')
+    if not os.path.exists(dist):
+        dist = project_path
     headers = {'Authorization': f'Bearer {token}'}
-    # Step 1: Get upload URL
-    file_list = []
-    for root, _, files in os.walk(dist_path):
-        for file in files:
-            full = os.path.join(root, file)
-            arcname = os.path.relpath(full, dist_path)
-            file_list.append((arcname, full))
-    # Create deployment
-    deploy_payload = {
-        "name": "multiverse-beast-deploy",
-        "files": [{"file": name, "sha": ""} for name, _ in file_list]
-    }
-    # Actually, Vercel REST API requires uploading files separately; simplified for brevity.
-    # For now, we'll fallback to using the CLI via npx (which is usually available).
-    cmd = f'npx vercel deploy --prod --token={token}'
-    result = subprocess.run(cmd, cwd=project_path, shell=True, capture_output=True, text=True)
-    if result.returncode == 0:
-        return f"Vercel deployment output:\n{result.stdout}"
+    create_resp = requests.post('https://api.vercel.com/v13/deployments', headers=headers, json={"name": "beast-deploy"})
+    if create_resp.status_code != 200:
+        return f"Vercel create deployment failed: {create_resp.text}"
+    deploy_data = create_resp.json()
+    deployment_id = deploy_data['id']
+    for rel, full in [(os.path.relpath(os.path.join(root, f), dist), os.path.join(root, f)) for root, _, files in os.walk(dist) for f in files]:
+        with open(full, 'rb') as f:
+            file_resp = requests.put(deploy_data['uploadUrls'][rel], data=f)
+            if file_resp.status_code not in [200, 204]:
+                return f"Vercel file upload failed for {rel}: {file_resp.status_code}"
+    finalize_resp = requests.post(f'https://api.vercel.com/v13/deployments/{deployment_id}/finalize', headers=headers)
+    if finalize_resp.status_code == 200:
+        url = f"https://{finalize_resp.json().get('url')}"
+        return f"Vercel deployed: {url}"
     else:
-        return f"Vercel deployment failed: {result.stderr}"
+        return f"Vercel finalize failed: {finalize_resp.text}"
+
+def deploy_anonymous(project_path: str) -> str:
+    dist = os.path.join(project_path, 'dist')
+    if not os.path.exists(dist):
+        dist = project_path
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for root, _, files in os.walk(dist):
+            for f in files:
+                full = os.path.join(root, f)
+                arc = os.path.relpath(full, dist)
+                zf.write(full, arc)
+    zip_buf.seek(0)
+    # If SURGE_TOKEN is set, use it; otherwise rely on unauthenticated deploy (may fail)
+    token = os.getenv('SURGE_TOKEN')
+    headers = {}
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
+    resp = requests.post('https://surge.sh/api/v1/deploy', files={'file': ('project.zip', zip_buf)}, headers=headers)
+    if resp.status_code == 200:
+        data = resp.json()
+        return f"Surge deployed: {data.get('url', 'unknown')}"
+    else:
+        return f"Surge deploy failed: {resp.text}"
 
 def deploy_cloudflare(project_path: str) -> str:
-    """Deploy to Cloudflare Pages via REST API (Wrangler not required)."""
     token = os.getenv('CLOUDFLARE_API_TOKEN')
     account_id = os.getenv('CLOUDFLARE_ACCOUNT_ID')
     if not token or not account_id:
         return "Cloudflare credentials missing."
-    subprocess.run(['npm', 'run', 'build'], cwd=project_path, shell=True, capture_output=True)
-    dist_path = os.path.join(project_path, 'dist')
-    if not os.path.exists(dist_path):
-        return "Build directory 'dist' not found."
+    dist = os.path.join(project_path, 'dist')
+    if not os.path.exists(dist):
+        dist = project_path
     # Cloudflare Pages direct upload: requires creating a project and then uploading assets.
-    # This is complex; we'll use the Wrangler CLI for reliability (if Node available).
-    cmd = f'npx wrangler pages deploy dist --project-name=multiverse-app --commit-dirty=true'
-    result = subprocess.run(cmd, cwd=project_path, shell=True, capture_output=True, text=True)
-    if result.returncode == 0:
-        return f"Cloudflare deployment output:\n{result.stdout}"
-    else:
-        return f"Cloudflare deployment failed: {result.stderr}"
-
-def deploy_anonymous(project_path: str) -> str:
-    """Deploy to surge.sh anonymously."""
-    subprocess.run(['npm', 'run', 'build'], cwd=project_path, shell=True, capture_output=True)
-    cmd = 'npx surge dist'
-    result = subprocess.run(cmd, cwd=project_path, shell=True, capture_output=True, text=True)
-    if result.returncode == 0:
-        return f"Surge deployment output:\n{result.stdout}"
-    else:
-        return f"Surge deployment failed: {result.stderr}"
+    # For simplicity, we'll use the Wrangler CLI if available (Node), otherwise return an error.
+    try:
+        result = subprocess.run(['npx', 'wrangler', 'pages', 'deploy', dist, '--project-name=multiverse-app', '--commit-dirty=true'],
+                                cwd=project_path, shell=True, capture_output=True, text=True)
+        if result.returncode == 0:
+            return f"Cloudflare deployed: {result.stdout.split('\n')[-2] if result.stdout else 'unknown'}"
+        else:
+            return f"Cloudflare deployment failed: {result.stderr}"
+    except Exception as e:
+        return f"Cloudflare deployment unavailable (Node missing): {str(e)}"
 
 # ---------- Signup automation ----------
 def signup_and_get_api_key(service: str) -> dict:

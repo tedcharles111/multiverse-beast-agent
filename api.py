@@ -39,7 +39,6 @@ class SelfImproveRequest(BaseModel):
 @app.options("/execute")
 @app.options("/generate-code")
 @app.options("/self-improve")
-@app.options("/deploy-netlify")
 async def options_all(): return {}
 
 @app.get("/health")

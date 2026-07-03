@@ -2,8 +2,15 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
-from agent.orchestrator import Orchestrator
-import uvicorn
+import uvicorn, traceback, sys
+
+# Log any import errors
+try:
+    from agent.orchestrator import Orchestrator
+except Exception as e:
+    print("IMPORT FAILED", file=sys.stderr)
+    traceback.print_exc()
+    Orchestrator = None
 
 app = FastAPI(title="Beast Coder Agent")
 app.add_middleware(
@@ -15,63 +22,41 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-orchestrator = Orchestrator()
-
 class TaskRequest(BaseModel):
+    prompt: str = ""
     task: Optional[str] = None
-    prompt: Optional[str] = None
     deep: bool = False
-    def get_task(self) -> str:
-        return self.task or self.prompt or ""
 
 class CodeGenRequest(BaseModel):
+    prompt: str = ""
     specification: Optional[str] = None
-    prompt: Optional[str] = None
     context: str = ""
-    def get_specification(self) -> str:
-        return self.specification or self.prompt or ""
-
-class SelfImproveRequest(BaseModel):
-    original_task: str
-    previous_response: str
-
-@app.options("/health")
-@app.options("/execute")
-@app.options("/generate-code")
-@app.options("/self-improve")
-async def options_all(): return {}
 
 @app.get("/health")
-async def health(): return {"status": "healthy"}
+async def health():
+    return {"status": "healthy"}
 
 @app.post("/execute")
-async def execute_task(request: TaskRequest):
-    task = request.get_task()
-    if not task:
-        raise HTTPException(422, "Need task or prompt")
+async def execute(req: TaskRequest):
+    if not Orchestrator: raise HTTPException(500, "Agent not initialized")
+    prompt = req.prompt or req.task or ""
+    if not prompt: raise HTTPException(422, "Need prompt")
     try:
-        result = orchestrator.plan_and_execute(task) if not request.deep else orchestrator.plan_and_execute_deep(task)
-        return {"status": "success", "result": result}
+        orch = Orchestrator()
+        res = orch.plan_and_execute(prompt) if not req.deep else orch.plan_and_execute_deep(prompt)
+        return {"status": "success", "result": res}
     except Exception as e:
         raise HTTPException(500, str(e))
 
 @app.post("/generate-code")
-async def generate_code(request: CodeGenRequest):
-    spec = request.get_specification()
-    if not spec and not request.context:
-        raise HTTPException(422, "Need specification/prompt or context")
+async def gen_code(req: CodeGenRequest):
+    if not Orchestrator: raise HTTPException(500, "Agent not initialized")
+    prompt = req.prompt or req.specification or ""
+    if not prompt: raise HTTPException(422, "Need prompt")
     try:
-        return {"status": "success", "code": orchestrator.generate_code(spec or "", request.context)}
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
-@app.post("/self-improve")
-async def self_improve(request: SelfImproveRequest):
-    if not request.original_task or not request.previous_response:
-        raise HTTPException(422, "Both original_task and previous_response required")
-    try:
-        improved = orchestrator.self_improve(request.original_task, request.previous_response)
-        return {"status": "success", "improved_result": improved}
+        orch = Orchestrator()
+        code = orch.generate_code(prompt, req.context)
+        return {"status": "success", "code": code}
     except Exception as e:
         raise HTTPException(500, str(e))
 

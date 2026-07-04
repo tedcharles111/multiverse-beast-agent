@@ -1,4 +1,4 @@
-import traceback, sys, time, threading, requests
+import traceback, sys, time, threading, concurrent.futures
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -8,7 +8,7 @@ from agent.orchestrator import Orchestrator
 
 app = FastAPI(title="Beast Coder Agent")
 
-# Global CORS middleware
+# --- CORS: applied to every single response, no exceptions ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,9 +18,9 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-# Global exception handler to force CORS on errors
+# --- Global exception handler (forces CORS even on 500/503) ---
 @app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
+async def universal_handler(request: Request, exc: Exception):
     return JSONResponse(
         status_code=500,
         content={"detail": str(exc)},
@@ -52,8 +52,14 @@ async def options_all():
 async def health():
     return {"status": "healthy"}
 
-def get_orch():
-    return Orchestrator()
+# Helper: run a function with a timeout (in seconds)
+def run_with_timeout(func, timeout_sec, *args, **kwargs):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(func, *args, **kwargs)
+        try:
+            return future.result(timeout=timeout_sec)
+        except concurrent.futures.TimeoutError:
+            raise TimeoutError(f"Operation timed out after {timeout_sec}s")
 
 @app.post("/execute")
 async def execute_task(req: TaskRequest):
@@ -61,13 +67,27 @@ async def execute_task(req: TaskRequest):
     if not prompt:
         raise HTTPException(422, "Need prompt")
     try:
-        orch = get_orch()
-        result = orch.plan_and_execute(prompt) if not req.deep else orch.plan_and_execute_deep(prompt)
+        orch = Orchestrator()
+        # 90-second hard timeout for the whole Mistral call
+        result = run_with_timeout(
+            orch.plan_and_execute_deep if req.deep else orch.plan_and_execute,
+            90, prompt
+        )
         return JSONResponse(content={"status": "success", "result": result})
+    except TimeoutError:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "error", "detail": "Agent took too long – please retry"},
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, str(e))
+        return JSONResponse(
+            status_code=500,
+            content={"detail": str(e)},
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
 
 @app.post("/generate-code")
 async def generate_code(req: CodeGenRequest):
@@ -75,38 +95,44 @@ async def generate_code(req: CodeGenRequest):
     if not prompt:
         raise HTTPException(422, "Need prompt")
     try:
-        orch = get_orch()
-        code = orch.generate_code(prompt, req.context)
+        orch = Orchestrator()
+        code = run_with_timeout(orch.generate_code, 90, prompt, req.context)
         return JSONResponse(content={"status": "success", "code": code})
+    except TimeoutError:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "error", "detail": "Agent took too long – please retry"},
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, str(e))
+        return JSONResponse(
+            status_code=500,
+            content={"detail": str(e)},
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
 
 @app.post("/self-improve")
 async def self_improve(req: SelfImproveRequest):
     try:
-        orch = get_orch()
-        improved = orch.self_improve(req.original_task, req.previous_response)
+        orch = Orchestrator()
+        improved = run_with_timeout(orch.self_improve, 90, req.original_task, req.previous_response)
         return JSONResponse(content={"status": "success", "improved_result": improved})
+    except TimeoutError:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "error", "detail": "Agent took too long – please retry"},
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, str(e))
-
-# Keep‑alive thread
-def keep_alive():
-    time.sleep(30)
-    while True:
-        try:
-            requests.get("http://localhost:8000/health", timeout=5)
-        except:
-            pass
-        time.sleep(300)
-
-@app.on_event("startup")
-async def startup():
-    threading.Thread(target=keep_alive, daemon=True).start()
+        return JSONResponse(
+            status_code=500,
+            content={"detail": str(e)},
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
 
 if __name__ == "__main__":
     import uvicorn

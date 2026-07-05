@@ -1,5 +1,4 @@
 import json, re, logging
-from typing import Dict, Any
 from agent.mistral_client import MistralClientPool
 from agent.prompts.system_prompts import ORCHESTRATOR_SYSTEM_PROMPT
 from config import MISTRAL_API_KEYS
@@ -46,16 +45,16 @@ class Orchestrator:
         if not calls:
             self.history.append({"role": "assistant", "content": resp})
             return resp
-        # Execute first tool call and append result to history
+        # Execute the first tool call
         tool_name, params_text = calls[0]
         params = {}
         for k, v in re.findall(r'(\w+)="([^"]*)"', params_text):
             params[k] = v
         tool_result = self._execute_tool(tool_name, params)
-        final_output = f"{resp}\n\n[Tool execution result for {tool_name}]: {tool_result}"
+        final = f"{resp}\n\n[Tool execution result for {tool_name}]: {tool_result}"
         self.history.append({"role": "assistant", "content": resp})
         self.history.append({"role": "user", "content": f"Tool {tool_name} result: {tool_result}"})
-        return final_output
+        return final
 
     def plan_and_execute_deep(self, prompt: str) -> str:
         self.history.append({"role": "user", "content": prompt})

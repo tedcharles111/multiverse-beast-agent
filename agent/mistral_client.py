@@ -6,7 +6,7 @@ MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
 
 # Priority order – exactly as requested
 MODELS = [
-    "pixtral-large-latest",
+    "mistral-code-agent-latest",
     "mistral-large-2512",
     "devstral-latest",
     "codestral-latest",

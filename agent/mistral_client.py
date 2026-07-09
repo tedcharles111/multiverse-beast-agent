@@ -12,6 +12,7 @@ MODELS = [
     "codestral-latest",
     "mistral-large-latest",
     "mistral-vibe-cli-latest",
+    "devstral-2512",
 ]
 
 class MistralClientPool:

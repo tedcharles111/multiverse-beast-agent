@@ -36,7 +36,7 @@ class MistralClientPool:
         }
 
     def chat(self, messages: List[Dict[str, str]], temperature: float = 0.2,
-             max_tokens: Optional[int] = 4096, **kwargs) -> str:
+             max_tokens: Optional[int] = 8192, **kwargs) -> str:
         errors = []
         # Try every model, every key (until first success)
         for _ in range(len(MODELS)):

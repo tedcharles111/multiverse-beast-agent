@@ -1,0 +1,7 @@
+name = "beast-agent-keep-alive"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+# Cron trigger: runs every 5 minutes (adjust if needed)
+[triggers]
+crons = ["*/5 * * * *"]

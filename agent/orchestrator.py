@@ -1,5 +1,6 @@
 import re
 import logging
+import inspect
 from agent.mistral_client import MistralClientPool
 from agent.prompts.system_prompts import ORCHESTRATOR_SYSTEM_PROMPT
 from config import MISTRAL_API_KEYS
@@ -17,13 +18,11 @@ class Orchestrator:
     # Tool registry
     # ------------------------------------------------------------------ #
     def _get_tools(self):
-        """Lazy-load every tool module and merge them into one dict."""
         if self._tools is not None:
             return self._tools
 
         registry = {}
 
-        # --- code_tools (shell, scaffolding, force_command) ---
         try:
             from agent.tools import code_tools
             registry.update({
@@ -36,7 +35,6 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"code_tools import failed: {e}")
 
-        # --- advanced_tools (deployments, crawl, screenshots, domains) ---
         try:
             from agent.tools import advanced_tools
             registry.update({
@@ -53,14 +51,12 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"advanced_tools import failed: {e}")
 
-        # --- deploy_tools (SSH) ---
         try:
             from agent.tools import deploy_tools
             registry["deploy_ssh"] = deploy_tools.deploy_via_ssh
         except Exception as e:
             logger.error(f"deploy_tools import failed: {e}")
 
-        # --- screenshot_tools (element + desktop) ---
         try:
             from agent.tools import screenshot_tools
             registry.update({
@@ -71,17 +67,70 @@ class Orchestrator:
             logger.error(f"screenshot_tools import failed: {e}")
 
         self._tools = registry
-        logger.info(f"Loaded {len(registry)} tools: {list(registry.keys())}")
+        logger.info(f"Loaded {len(registry)} tools: {sorted(registry.keys())}")
         return registry
 
-    def _execute_tool(self, name: str, params: dict) -> str:
+    # ------------------------------------------------------------------ #
+    # Parameter normalization
+    # ------------------------------------------------------------------ #
+    # Aliases the LLM commonly uses → canonical function param names
+    PARAM_ALIASES = {
+        "command": "cmd",
+        "shell_command": "cmd",
+        "shell": "cmd",
+        "cwd": "cwd",
+        "working_dir": "cwd",
+        "working_directory": "cwd",
+        "path": "project_path",
+        "directory": "project_path",
+        "dir": "project_path",
+        "url": "url",
+        "selector": "selector",
+        "domain": "domain_name",
+        "domain_name": "domain_name",
+        "provider": "provider",
+        "service": "service_name",
+        "service_name": "service_name",
+        "project": "project_name",
+        "project_name": "project_name",
+    }
+
+    def _call_tool(self, func, params: dict, raw_text: str):
+        """Call the tool with flexible argument handling."""
+        try:
+            sig = inspect.signature(func)
+        except (TypeError, ValueError):
+            return func(**params) if params else func(raw_text)
+
+        # Normalize param names using aliases
+        normalized = {}
+        for k, v in params.items():
+            key = k.strip().lower()
+            normalized[self.PARAM_ALIASES.get(key, k)] = v
+
+        # If no params were extracted but we have raw text, use it as the first param
+        if not normalized and raw_text and raw_text.strip():
+            positional = [
+                name for name, p in sig.parameters.items()
+                if p.default is inspect.Parameter.empty
+                and p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            ]
+            if positional:
+                normalized[positional[0]] = raw_text.strip()
+
+        return func(**normalized)
+
+    # ------------------------------------------------------------------ #
+    # Execution
+    # ------------------------------------------------------------------ #
+    def _execute_tool(self, name: str, params: dict, raw_text: str = "") -> str:
         tools = self._get_tools()
         func = tools.get(name)
         if not func:
             available = ", ".join(sorted(tools.keys())) or "(none loaded)"
-            return f"Tool '{name}' not found. Available tools: {available}"
+            return f"Tool '{name}' not found. Available: {available}"
         try:
-            result = func(**params)
+            result = self._call_tool(func, params, raw_text)
             return str(result)
         except Exception as e:
             return f"Tool '{name}' error: {str(e)}"
@@ -90,16 +139,16 @@ class Orchestrator:
     # Parsing
     # ------------------------------------------------------------------ #
     def _extract_calls(self, text: str):
-        """Find all <tool name="...">...</tool> blocks."""
+        """Return list of (tool_name, inner_text)."""
         pattern = r'<tool\s+name="([^"]+)"\s*>(.*?)</tool>'
         return re.findall(pattern, text, re.DOTALL)
 
-    def _parse_params(self, params_text: str) -> dict:
-        """Parse key=\"value\" lines into a dict."""
-        params = {}
-        for k, v in re.findall(r'(\w+)\s*=\s*"([^"]*)"', params_text):
-            params[k] = v.strip()
-        return params
+    def _parse_params(self, inner_text: str) -> dict:
+        """Extract key=\"value\" pairs from inside the tool block."""
+        return {
+            k: v.strip()
+            for k, v in re.findall(r'(\w+)\s*=\s*"([^"]*)"', inner_text)
+        }
 
     # ------------------------------------------------------------------ #
     # Main entry points
@@ -113,11 +162,10 @@ class Orchestrator:
             self.history.append({"role": "assistant", "content": resp})
             return resp
 
-        # Execute EVERY tool call found (not just the first)
         results = []
-        for tool_name, params_text in calls:
-            params = self._parse_params(params_text)
-            result = self._execute_tool(tool_name, params)
+        for tool_name, inner_text in calls:
+            params = self._parse_params(inner_text)
+            result = self._execute_tool(tool_name, params, raw_text=inner_text)
             results.append(f"[Tool {tool_name} result]: {result}")
 
         combined = "\n".join(results)
